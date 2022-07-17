@@ -1,0 +1,11 @@
+[package]
+name = "xml1"
+version = "0.1.0"
+edition = "2021"
+description = "sane, non compliant xml parser without allocations"
+license = "MIT OR Apache-2.0"
+documentation = "https://docs.rs/xml1"
+repository = "https://github.com/lassade/xml1"
+authors = ["Felipe Jorge <felipe.jorge.pereira@gmail.com>"]
+
+[dependencies]
