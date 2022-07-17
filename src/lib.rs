@@ -1,6 +1,18 @@
+//! Basic usage is:
+//!
+//! ```rust
+//! for evn in XmlIter::from("<a min=\"0, 0\">Some Text</a>") {
+//!     dbg!(evn);
+//!     // do something with evn
+//! }
+//! ```
+//!
+//! You may want to keep a stack around to push values and modify it's attributes.
+
 mod chars;
 use chars::Chars;
 
+/// Xml events returned from the [`XmlIter`]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum XmlEvent<'a> {
     PushElement {
@@ -18,6 +30,7 @@ pub enum XmlEvent<'a> {
     },
 }
 
+/// Xml parser, it iterates over a stream of `chars` returning [`XmlEvent`]s
 pub struct XmlIter<'a> {
     input: Chars<'a>,
     prop: bool,
