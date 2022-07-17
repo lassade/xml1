@@ -45,6 +45,7 @@ impl<'a> Iterator for XmlIter<'a> {
 }
 
 impl<'a> XmlIter<'a> {
+    #[inline]
     fn ignore_whitespace(&mut self) {
         while let Some(ch) = self.input.head() {
             if ch.is_whitespace() {
@@ -130,7 +131,7 @@ impl<'a> XmlIter<'a> {
     fn push_element(&mut self) -> Option<XmlEvent<'a>> {
         let cursor = self.input.cursor();
         while let Some(ch) = self.input.head() {
-            if ch.is_alphanumeric() || ch == '_' || ch == '-' {
+            if !ch.is_whitespace() {
                 self.input.next();
             } else {
                 let name = self.input.sub_str_from_cursor(cursor);
@@ -206,19 +207,80 @@ impl<'a> XmlIter<'a> {
                     // end
                     return None;
                 }
-                Some(ch) => {
-                    if ch.is_alphanumeric() || ch == '_' || ch == '_' {
-                        return self.push_attr();
-                    } else {
-                        panic!("unexpected char `{}`", ch);
-                    }
+                _ => {
+                    return self.push_attr();
                 }
             }
         }
     }
 
     fn push_attr(&mut self) -> Option<XmlEvent<'a>> {
-        None
+        // attribute name
+        let name;
+        let cursor = self.input.cursor();
+        loop {
+            if let Some(ch) = self.input.head() {
+                if !ch.is_whitespace() && ch != '=' {
+                    self.input.next();
+                } else {
+                    name = self.input.sub_str_from_cursor(cursor);
+                    if name.len() == 0 {
+                        panic!("missing attribute name");
+                    }
+                    break;
+                }
+            } else {
+                panic!("unexpected end of file");
+            }
+        }
+
+        self.ignore_whitespace();
+
+        if self.input.head() != Some('=') {
+            // attribute has no value
+            return Some(XmlEvent::Attr { name, value: None });
+        }
+
+        // consume '='
+        self.input.next();
+        self.ignore_whitespace();
+
+        // expect and consume '\"'
+        match self.input.head() {
+            Some('\"') => {
+                self.input.next();
+            }
+            None => panic!("unexpected end of file"),
+            Some(ch) => panic!("unexpected char `{}`", ch),
+        }
+
+        // attribute value
+        let value;
+        let cursor = self.input.cursor();
+        loop {
+            match self.input.head() {
+                Some('\"') => {
+                    value = Some(self.input.sub_str_from_cursor(cursor));
+                    self.input.next();
+                    break;
+                }
+                Some('\\') => {
+                    // consume '\\'
+                    self.input.next();
+                    // ignore scaped char, any escaped utf8 chars in the format '\uXXXX' should be covered
+                    self.input.next();
+                }
+                None => {
+                    panic!("unexpected end of file");
+                }
+                _ => {
+                    // keep reading string
+                    self.input.next();
+                }
+            }
+        }
+
+        return Some(XmlEvent::Attr { name, value });
     }
 }
 
@@ -322,7 +384,7 @@ mod tests {
             [
                 XmlEvent::PushElement { name: "r" },
                 XmlEvent::Attr {
-                    name: "name",
+                    name: "min",
                     value: Some("0, 0"),
                 },
                 XmlEvent::PopElement { name: Some("r") },

@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 use core::{ptr::null, slice, str::from_utf8_unchecked};
 
 /// Similar to [`core::str::Chars`] but it can peek and retain pointer information
