@@ -84,8 +84,6 @@ impl<'a> XmlIter<'a> {
         loop {
             self.ignore_whitespace();
 
-            //println!("'{:?}', \"{}\"", self.input.head(), self.input.tail());
-
             match self.input.head() {
                 Some('<') => {
                     // note: the tail doesn't contains the head
@@ -131,7 +129,7 @@ impl<'a> XmlIter<'a> {
     fn push_element(&mut self) -> Option<XmlEvent<'a>> {
         let cursor = self.input.cursor();
         while let Some(ch) = self.input.head() {
-            if !ch.is_whitespace() {
+            if !ch.is_whitespace() && ch != '>' && ch != '/' {
                 self.input.next();
             } else {
                 let name = self.input.sub_str_from_cursor(cursor);
@@ -286,7 +284,45 @@ impl<'a> XmlIter<'a> {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        alloc::{GlobalAlloc, Layout, System},
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
     use super::*;
+
+    struct Allocator;
+
+    static ALLOCATIONS_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe impl GlobalAlloc for Allocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            ALLOCATIONS_COUNT.fetch_add(1, Ordering::Relaxed);
+            System.alloc(layout)
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            System.dealloc(ptr, layout)
+        }
+    }
+
+    #[global_allocator]
+    static GLOBAL: Allocator = Allocator;
+
+    #[test]
+    fn alloc() {
+        // reset allocations
+        ALLOCATIONS_COUNT.store(0, Ordering::Relaxed);
+
+        let allocation = Box::new('x');
+
+        assert_eq!(
+            ALLOCATIONS_COUNT.load(Ordering::Relaxed),
+            1,
+            "didn't count allocation"
+        );
+        assert!(*allocation == 'x');
+    }
 
     fn cmp<'a, 'b>(
         mut a: impl Iterator<Item = XmlEvent<'a>>,
@@ -306,6 +342,9 @@ mod tests {
 
     #[test]
     fn elements() {
+        // reset allocations
+        ALLOCATIONS_COUNT.store(0, Ordering::Relaxed);
+
         cmp(
             XmlIter::from("<r></r>"),
             [
@@ -349,10 +388,15 @@ mod tests {
             .iter()
             .copied(),
         );
+
+        assert_eq!(ALLOCATIONS_COUNT.load(Ordering::Relaxed), 0, "allocated");
     }
 
     #[test]
     fn comments() {
+        // reset allocations
+        ALLOCATIONS_COUNT.store(0, Ordering::Relaxed);
+
         cmp(XmlIter::from("<!--<r></r>-->"), [].iter().copied());
         cmp(XmlIter::from("<!--<r></r>"), [].iter().copied());
 
@@ -375,10 +419,15 @@ mod tests {
             .iter()
             .copied(),
         );
+
+        assert_eq!(ALLOCATIONS_COUNT.load(Ordering::Relaxed), 0, "allocated");
     }
 
     #[test]
     fn attributes() {
+        // reset allocations
+        ALLOCATIONS_COUNT.store(0, Ordering::Relaxed);
+
         cmp(
             XmlIter::from("<r min=\"0, 0\"></r>"),
             [
@@ -392,10 +441,47 @@ mod tests {
             .iter()
             .copied(),
         );
+
+        cmp(
+            XmlIter::from("<r toggle color=\"#fff\"></r>"),
+            [
+                XmlEvent::PushElement { name: "r" },
+                XmlEvent::Attr {
+                    name: "toggle",
+                    value: None,
+                },
+                XmlEvent::Attr {
+                    name: "color",
+                    value: Some("#fff"),
+                },
+                XmlEvent::PopElement { name: Some("r") },
+            ]
+            .iter()
+            .copied(),
+        );
+
+        cmp(
+            XmlIter::from(r#"<r text="\"escaped\" sequence \u0041"></r>"#),
+            [
+                XmlEvent::PushElement { name: "r" },
+                XmlEvent::Attr {
+                    name: "text",
+                    value: Some("\\\"escaped\\\" sequence \\u0041"),
+                },
+                XmlEvent::PopElement { name: Some("r") },
+            ]
+            .iter()
+            .copied(),
+        );
+
+        assert_eq!(ALLOCATIONS_COUNT.load(Ordering::Relaxed), 0, "allocated");
     }
 
     #[test]
     fn text() {
+        // reset allocations
+        ALLOCATIONS_COUNT.store(0, Ordering::Relaxed);
+
         cmp(
             XmlIter::from("<a>  some text  </a>"),
             [
@@ -429,5 +515,7 @@ mod tests {
             .iter()
             .copied(),
         );
+
+        assert_eq!(ALLOCATIONS_COUNT.load(Ordering::Relaxed), 0, "allocated");
     }
 }
