@@ -9,3 +9,4 @@ repository = "https://github.com/lassade/xml1"
 authors = ["Felipe Jorge <felipe.jorge.pereira@gmail.com>"]
 
 [dependencies]
+codespan-reporting = "0.11.1"

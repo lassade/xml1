@@ -13,7 +13,7 @@ pub enum XmlEvent<'a> {
         name: &'a str,
         value: Option<&'a str>,
     },
-    Chars {
+    Text {
         text: &'a str,
     },
 }
@@ -56,20 +56,23 @@ impl<'a> XmlIter<'a> {
     }
 
     fn ignore_comment(&mut self) {
-        // expects `!--`
-        self.input.next();
-        self.input.next();
-        self.input.next();
+        // expects input to be head = Some('!'), tail = "--"
+        debug_assert!(self.input.head() == Some('!'));
+        debug_assert!(self.input.tail().starts_with("--"));
+        self.input.next(); // head = Some('-'), tail = "-..."
+        self.input.next(); // head = Some('-'), tail = "..."
 
         loop {
             let rem = self.input.tail();
             if rem.starts_with("-->") {
-                self.input.next();
-                self.input.next();
-                self.input.next();
+                // head = Some(?), tail = "-->..."
+                self.input.next(); // head = Some('-'), tail = "->..."
+                self.input.next(); // head = Some('-'), tail = ">..."
+                self.input.next(); // head = Some('>'), tail = "..."
+                self.input.next(); // head = ?, tail = "..."
                 break;
             } else {
-                if self.input.next() == None || rem.len() < "-->".len() {
+                if self.input.next() == None {
                     break;
                 }
             }
@@ -80,7 +83,7 @@ impl<'a> XmlIter<'a> {
         loop {
             self.ignore_whitespace();
 
-            println!("'{:?}', \"{}\"", self.input.head(), self.input.tail());
+            //println!("'{:?}', \"{}\"", self.input.head(), self.input.tail());
 
             match self.input.head() {
                 Some('<') => {
@@ -103,11 +106,25 @@ impl<'a> XmlIter<'a> {
                     // end
                     return None;
                 }
-                Some(ch) => {
-                    panic!("unexpected char `{}`", ch);
+                _ => {
+                    return self.push_text();
                 }
             }
         }
+    }
+
+    fn push_text(&mut self) -> Option<XmlEvent<'a>> {
+        let cursor = self.input.cursor();
+        while let Some(ch) = self.input.head() {
+            if ch.is_whitespace() {
+                return Some(XmlEvent::Text {
+                    text: self.input.sub_str_from_cursor(cursor),
+                });
+            } else {
+                self.input.next();
+            }
+        }
+        None
     }
 
     fn push_element(&mut self) -> Option<XmlEvent<'a>> {
@@ -151,7 +168,13 @@ impl<'a> XmlIter<'a> {
 
             match self.input.head() {
                 Some('<') => {
-                    todo!()
+                    // consume '<'
+                    self.input.next();
+                    match self.input.head() {
+                        Some('!') => self.ignore_comment(),
+                        None => panic!("unexpected end of file"),
+                        Some(ch) => panic!("unexpected char `{}`", ch),
+                    }
                 }
                 Some('>') => {
                     // consume '>'
@@ -220,11 +243,25 @@ mod tests {
     }
 
     #[test]
-    fn basic() {
+    fn elements() {
         cmp(
             XmlIter::from("<r></r>"),
             [
                 XmlEvent::PushElement { name: "r" },
+                XmlEvent::PopElement { name: Some("r") },
+            ]
+            .iter()
+            .copied(),
+        );
+
+        cmp(
+            XmlIter::from("<r><a><b></b></a></r>"),
+            [
+                XmlEvent::PushElement { name: "r" },
+                XmlEvent::PushElement { name: "a" },
+                XmlEvent::PushElement { name: "b" },
+                XmlEvent::PopElement { name: Some("b") },
+                XmlEvent::PopElement { name: Some("a") },
                 XmlEvent::PopElement { name: Some("r") },
             ]
             .iter()
@@ -272,6 +309,60 @@ mod tests {
             [
                 XmlEvent::PushElement { name: "r" },
                 XmlEvent::PopElement { name: Some("r") },
+            ]
+            .iter()
+            .copied(),
+        );
+    }
+
+    #[test]
+    fn attributes() {
+        cmp(
+            XmlIter::from("<r min=\"0, 0\"></r>"),
+            [
+                XmlEvent::PushElement { name: "r" },
+                XmlEvent::Attr {
+                    name: "name",
+                    value: Some("0, 0"),
+                },
+                XmlEvent::PopElement { name: Some("r") },
+            ]
+            .iter()
+            .copied(),
+        );
+    }
+
+    #[test]
+    fn text() {
+        cmp(
+            XmlIter::from("<a>  some text  </a>"),
+            [
+                XmlEvent::PushElement { name: "a" },
+                XmlEvent::Text { text: "some" },
+                XmlEvent::Text { text: "text" },
+                XmlEvent::PopElement { name: Some("a") },
+            ]
+            .iter()
+            .copied(),
+        );
+
+        cmp(
+            XmlIter::from("<a>  some <!-- not --> text  </a>"),
+            [
+                XmlEvent::PushElement { name: "a" },
+                XmlEvent::Text { text: "some" },
+                XmlEvent::Text { text: "text" },
+                XmlEvent::PopElement { name: Some("a") },
+            ]
+            .iter()
+            .copied(),
+        );
+
+        cmp(
+            XmlIter::from("  text\n only  "),
+            [
+                XmlEvent::Text { text: "text" },
+                XmlEvent::Text { text: "only" },
             ]
             .iter()
             .copied(),
