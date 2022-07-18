@@ -61,7 +61,8 @@ impl<'a> XmlIter<'a> {
     #[inline]
     fn ignore_whitespace(&mut self) {
         while let Some(ch) = self.input.head() {
-            if ch.is_whitespace() {
+            // ignore right-to-left mark to better support these langs
+            if ch.is_whitespace() || ch == '\u{200F}' {
                 self.input.next();
             } else {
                 break;
@@ -160,15 +161,24 @@ impl<'a> XmlIter<'a> {
     fn pop_element(&mut self) -> Option<XmlEvent<'a>> {
         let cursor = self.input.cursor();
         while let Some(ch) = self.input.head() {
-            if ch.is_alphanumeric() || ch == '_' || ch == '-' {
+            if !ch.is_whitespace() && ch != '>' {
                 self.input.next();
-            } else if ch == '>' {
-                let name = Some(self.input.sub_str_from_cursor(cursor));
-                // consume '>'
-                self.input.next();
-                return Some(XmlEvent::PopElement { name });
             } else {
-                panic!("unexpected char `{}`", ch);
+                let name = Some(self.input.sub_str_from_cursor(cursor));
+
+                self.ignore_whitespace();
+                match self.input.head() {
+                    Some('>') => {
+                        // consume '>'
+                        self.input.next();
+                    }
+                    Some(ch) => {
+                        panic!("unexpected char `{}` (\\u{:X})", ch, ch as u32);
+                    }
+                    None => panic!("unexpected end of file"),
+                }
+
+                return Some(XmlEvent::PopElement { name });
             }
         }
         None
@@ -185,7 +195,7 @@ impl<'a> XmlIter<'a> {
                     match self.input.head() {
                         Some('!') => self.ignore_comment(),
                         None => panic!("unexpected end of file"),
-                        Some(ch) => panic!("unexpected char `{}`", ch),
+                        Some(ch) => panic!("unexpected char `{}` (\\u{:X})", ch, ch as u32),
                     }
                 }
                 Some('>') => {
@@ -210,7 +220,7 @@ impl<'a> XmlIter<'a> {
                             panic!("unexpected end of file");
                         }
                         Some(ch) => {
-                            panic!("unexpected char `{}`", ch);
+                            panic!("unexpected char `{}` (\\u{:X})", ch, ch as u32);
                         }
                     }
                 }
@@ -231,7 +241,7 @@ impl<'a> XmlIter<'a> {
         let cursor = self.input.cursor();
         loop {
             if let Some(ch) = self.input.head() {
-                if !ch.is_whitespace() && ch != '=' {
+                if !ch.is_whitespace() && ch != '=' && ch != '>' && ch != '/' {
                     self.input.next();
                 } else {
                     name = self.input.sub_str_from_cursor(cursor);
@@ -262,7 +272,7 @@ impl<'a> XmlIter<'a> {
                 self.input.next();
             }
             None => panic!("unexpected end of file"),
-            Some(ch) => panic!("unexpected char `{}`", ch),
+            Some(ch) => panic!("unexpected char `{}` (\\u{:X})", ch, ch as u32),
         }
 
         // attribute value
@@ -323,7 +333,7 @@ mod tests {
     static GLOBAL: Allocator = Allocator;
 
     #[test]
-    fn alloc() {
+    fn is_counting_allocations() {
         // reset allocations
         ALLOCATIONS_COUNT.store(0, Ordering::Relaxed);
 
@@ -442,6 +452,34 @@ mod tests {
         ALLOCATIONS_COUNT.store(0, Ordering::Relaxed);
 
         cmp(
+            XmlIter::from("<r clip></r>"),
+            [
+                XmlEvent::PushElement { name: "r" },
+                XmlEvent::Attr {
+                    name: "clip",
+                    value: None,
+                },
+                XmlEvent::PopElement { name: Some("r") },
+            ]
+            .iter()
+            .copied(),
+        );
+
+        cmp(
+            XmlIter::from("<r clip/>"),
+            [
+                XmlEvent::PushElement { name: "r" },
+                XmlEvent::Attr {
+                    name: "clip",
+                    value: None,
+                },
+                XmlEvent::PopElement { name: None },
+            ]
+            .iter()
+            .copied(),
+        );
+
+        cmp(
             XmlIter::from("<r min=\"0, 0\"></r>"),
             [
                 XmlEvent::PushElement { name: "r" },
@@ -524,6 +562,65 @@ mod tests {
             [
                 XmlEvent::Text { text: "text" },
                 XmlEvent::Text { text: "only" },
+            ]
+            .iter()
+            .copied(),
+        );
+
+        assert_eq!(ALLOCATIONS_COUNT.load(Ordering::Relaxed), 0, "allocated");
+    }
+
+    #[test]
+    fn full_utf8_support() {
+        // reset allocations
+        ALLOCATIONS_COUNT.store(0, Ordering::Relaxed);
+
+        cmp(
+            XmlIter::from(r#"<サイボーグ 難易度="難しい" ></サイボーグ>"#),
+            [
+                XmlEvent::PushElement {
+                    name: "サイボーグ"
+                },
+                XmlEvent::Attr {
+                    name: "難易度",
+                    value: Some("難しい"),
+                },
+                XmlEvent::PopElement {
+                    name: Some("サイボーグ"),
+                },
+            ]
+            .iter()
+            .copied(),
+        );
+
+        // \u{200F} unsures vscode will draw the string right
+        cmp(
+            XmlIter::from(r#"‏ <سايبورغ الصعوبة="صعب"> </سايبورغ>"#),
+            [
+                XmlEvent::PushElement {
+                    name: "سايبورغ"
+                },
+                XmlEvent::Attr {
+                    name: "الصعوبة",
+                    value: Some("صعب"),
+                },
+                XmlEvent::PopElement {
+                    name: Some("سايبورغ"),
+                },
+            ]
+            .iter()
+            .copied(),
+        );
+
+        cmp(
+            XmlIter::from(r#"<☕ ⚪="⚽" ></☕>"#),
+            [
+                XmlEvent::PushElement { name: "☕" },
+                XmlEvent::Attr {
+                    name: "⚪",
+                    value: Some("⚽"),
+                },
+                XmlEvent::PopElement { name: Some("☕") },
             ]
             .iter()
             .copied(),
