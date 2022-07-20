@@ -8,6 +8,8 @@
 //! ```
 //!
 //! You may want to keep a stack around to push values and modify it's attributes.
+//!
+//! Less than sign `'<'` must be escaped during texts sequeces
 
 mod chars;
 use chars::Chars;
@@ -129,15 +131,16 @@ impl<'a> XmlIter<'a> {
     fn push_text(&mut self) -> Option<XmlEvent<'a>> {
         let cursor = self.input.cursor();
         while let Some(ch) = self.input.head() {
-            if ch.is_whitespace() {
-                return Some(XmlEvent::Text {
-                    text: self.input.sub_str_from_cursor(cursor),
-                });
+            if ch == '\n' || ch == '<' {
+                break;
             } else {
                 self.input.next();
             }
         }
-        None
+
+        Some(XmlEvent::Text {
+            text: self.input.sub_str_from_cursor(cursor).trim_end(),
+        })
     }
 
     fn push_element(&mut self) -> Option<XmlEvent<'a>> {
@@ -537,8 +540,18 @@ mod tests {
             XmlIter::from("<a>  some text  </a>"),
             [
                 XmlEvent::PushElement { name: "a" },
-                XmlEvent::Text { text: "some" },
-                XmlEvent::Text { text: "text" },
+                XmlEvent::Text { text: "some text" },
+                XmlEvent::PopElement { name: Some("a") },
+            ]
+            .iter()
+            .copied(),
+        );
+
+        cmp(
+            XmlIter::from("<a>some text</a>"),
+            [
+                XmlEvent::PushElement { name: "a" },
+                XmlEvent::Text { text: "some text" },
                 XmlEvent::PopElement { name: Some("a") },
             ]
             .iter()
@@ -562,6 +575,51 @@ mod tests {
             [
                 XmlEvent::Text { text: "text" },
                 XmlEvent::Text { text: "only" },
+            ]
+            .iter()
+            .copied(),
+        );
+
+        // doesnt support embedding '<' or '>' during the texts
+        cmp(
+            XmlIter::from("<a>20 &lt; 30</a>"),
+            [
+                XmlEvent::PushElement { name: "a" },
+                XmlEvent::Text { text: "20 &lt; 30" },
+                XmlEvent::PopElement { name: Some("a") },
+            ]
+            .iter()
+            .copied(),
+        );
+
+        assert_eq!(ALLOCATIONS_COUNT.load(Ordering::Relaxed), 0, "allocated");
+    }
+
+    #[test]
+    fn multiline_text() {
+        // reset allocations
+        ALLOCATIONS_COUNT.store(0, Ordering::Relaxed);
+
+        // big text chunck
+        cmp(
+            XmlIter::from(
+                r#"<a color="rgb(0, 0, 0)">
+                    Lorem ipsum dolor sit amet, consectetur adipiscing elit. Pellentesque rhoncus dui in leo mollis,
+                    eleifend auctor neque gravida. Mauris quis tortor eget quam porttitor vulputate.
+                    Ut cursus quam vitae turpis bibendum congue. Orci varius natoque penatibus et magnis dis parturient montes,
+                    nascetur ridiculus mus. Ut tincidunt eu arcu eu dapibus. Nunc non urna orci. Quisque sit amet nisi viverra,
+                    malesuada lacus id, congue neque.
+                </a>"#,
+            ),
+            [
+                XmlEvent::PushElement { name: "a" },
+                XmlEvent::Attr { name: "color", value: Some("rgb(0, 0, 0)") },
+                XmlEvent::Text { text: "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Pellentesque rhoncus dui in leo mollis," },
+                XmlEvent::Text { text: "eleifend auctor neque gravida. Mauris quis tortor eget quam porttitor vulputate." },
+                XmlEvent::Text { text: "Ut cursus quam vitae turpis bibendum congue. Orci varius natoque penatibus et magnis dis parturient montes," },
+                XmlEvent::Text { text: "nascetur ridiculus mus. Ut tincidunt eu arcu eu dapibus. Nunc non urna orci. Quisque sit amet nisi viverra," },
+                XmlEvent::Text { text: "malesuada lacus id, congue neque." },
+                XmlEvent::PopElement { name: Some("a") },
             ]
             .iter()
             .copied(),
