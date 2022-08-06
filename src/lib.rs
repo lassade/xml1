@@ -60,7 +60,7 @@ impl<'a> Iterator for XmlIter<'a> {
 }
 
 impl<'a> XmlIter<'a> {
-    #[inline]
+    #[inline(always)]
     fn ignore_whitespace(&mut self) {
         while let Some(ch) = self.input.head() {
             // ignore right-to-left mark to better support these langs
