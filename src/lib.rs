@@ -11,8 +11,140 @@
 //!
 //! Less than sign `'<'` must be escaped during texts sequeces
 
-mod chars;
-use chars::Chars;
+/// Points to a valid UTF8 character inside a [`str`], used to take sub strings
+#[derive(Copy, Clone)]
+struct Cursor {
+    ptr: *const u8,
+}
+
+struct Text<'a> {
+    text: &'a str,
+}
+
+impl<'a> Text<'a> {
+    const fn len(&mut self) -> usize {
+        self.text.len()
+    }
+
+    fn next(&mut self) -> bool {
+        if self.text.len() == 0 {
+            return false;
+        }
+
+        // safety: assumes that text is a valid utf8 string1,
+        unsafe {
+            let offset = (*self.text.as_ptr()).leading_ones() as usize;
+            self.text = core::str::from_utf8_unchecked(core::slice::from_raw_parts(
+                self.text.as_ptr().add(offset),
+                self.text.len() - offset,
+            ));
+        }
+
+        true
+    }
+
+    fn next_cond(&mut self, v: &str) -> bool {
+        if self.text.as_bytes().starts_with(v.as_bytes()) {
+            unsafe {
+                let offset = v.len();
+                self.text = core::str::from_utf8_unchecked(core::slice::from_raw_parts(
+                    self.text.as_ptr().add(offset),
+                    self.text.len() - offset,
+                ));
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    fn rtrim(&mut self) {
+        const ASCII: [u8; 128] = [
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+            1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        ];
+        #[inline(always)]
+        pub unsafe fn ascii_lookup(x: u8) -> bool {
+            *ASCII.get_unchecked(x as usize) == 0
+        }
+
+        static UNICODE: [u8; 256] = [
+            2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2, 2, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        #[inline(always)]
+        pub unsafe fn unicode_lookup(x: u8, y: u8) -> bool {
+            match y {
+                0 => UNICODE.get_unchecked(x as usize) & 1 != 0,
+                22 => x == 0x80 && y == 0x16,
+                32 => UNICODE.get_unchecked(x as usize) & 2 != 0,
+                48 => x == 0x00 && y == 0x30,
+                _ => false,
+            }
+        }
+
+        let ptr = self.text.as_ptr();
+        unsafe {
+            let ptr_end = ptr.add(self.text.len());
+            loop {
+                if ptr >= ptr_end {
+                    break;
+                }
+
+                let x = *ptr;
+                if x > 127 {
+                    // process the unicode char
+                    let y = *ptr.add(1);
+                    if unicode_lookup(x, y) {
+                        let offset = x.leading_ones() as usize;
+                        ptr = ptr.add(offset);
+                        continue;
+                    } else {
+                        break;
+                    }
+                } else {
+                    // ascii char
+                    if !ascii_lookup(x) {
+                        break;
+                    }
+                }
+
+                ptr = ptr.add(1);
+            }
+
+            self.text = core::str::from_utf8_unchecked(core::slice::from_raw_parts(
+                ptr,
+                ptr_end.offset_from(ptr) as usize, // todo: use sub_ptr once it get stable
+            ));
+        }
+    }
+
+    #[inline(always)]
+    pub fn cursor(&self) -> Cursor {
+        Cursor {
+            ptr: self.text.as_ptr(),
+        }
+    }
+
+    /// SAFETY: Must the cursor must be from the same text
+    #[inline(always)]
+    pub unsafe fn sub_str_from_cursor(&self, cursor: Cursor) -> &'a str {
+        core::str::from_utf8_unchecked(core::slice::from_raw_parts(
+            cursor.ptr,
+            self.text.as_ptr().offset_from(cursor.ptr) as _,
+        ))
+    }
+}
 
 /// Xml events returned from the [`XmlIter`]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,14 +166,14 @@ pub enum XmlEvent<'a> {
 
 /// Xml parser, it iterates over a stream of `chars` returning [`XmlEvent`]s
 pub struct XmlIter<'a> {
-    input: Chars<'a>,
+    text: Text<'a>,
     prop: bool,
 }
 
 impl<'a> From<&'a str> for XmlIter<'a> {
     fn from(input: &'a str) -> Self {
         Self {
-            input: input.into(),
+            text: Text { text: input },
             prop: false,
         }
     }
@@ -60,36 +192,12 @@ impl<'a> Iterator for XmlIter<'a> {
 }
 
 impl<'a> XmlIter<'a> {
-    #[inline(always)]
-    fn ignore_whitespace(&mut self) {
-        while let Some(ch) = self.input.head() {
-            // ignore right-to-left mark to better support these langs
-            if ch.is_whitespace() || ch == '\u{200F}' {
-                self.input.next();
-            } else {
-                break;
-            }
-        }
-    }
-
     fn ignore_comment(&mut self) {
-        // expects input to be head = Some('!'), tail = "--"
-        debug_assert!(self.input.head() == Some('!'));
-        debug_assert!(self.input.tail().starts_with("--"));
-        self.input.next(); // head = Some('-'), tail = "-..."
-        self.input.next(); // head = Some('-'), tail = "..."
-
         loop {
-            let rem = self.input.tail();
-            if rem.starts_with("-->") {
-                // head = Some(?), tail = "-->..."
-                self.input.next(); // head = Some('-'), tail = "->..."
-                self.input.next(); // head = Some('-'), tail = ">..."
-                self.input.next(); // head = Some('>'), tail = "..."
-                self.input.next(); // head = ?, tail = "..."
+            if self.text.next_cond("-->") {
                 break;
             } else {
-                if self.input.next() == None {
+                if !self.text.next() {
                     break;
                 }
             }
@@ -98,58 +206,46 @@ impl<'a> XmlIter<'a> {
 
     fn document_events(&mut self) -> Option<XmlEvent<'a>> {
         loop {
-            self.ignore_whitespace();
+            self.text.rtrim();
 
-            match self.input.head() {
-                Some('<') => {
-                    // note: the tail doesn't contains the head
-                    let rem = self.input.tail();
-                    // consume '<'
-                    self.input.next();
-                    if rem.starts_with("/") {
-                        // consume '/'
-                        self.input.next();
-                        return self.pop_element();
-                    } else if rem.starts_with("!--") {
-                        self.ignore_comment();
-                        continue;
-                    } else {
-                        return self.push_element();
-                    }
-                }
-                None => {
-                    // end
-                    return None;
-                }
-                _ => {
-                    return self.push_text();
-                }
+            if self.text.len() == 0 {
+                // end
+                return None;
+            } else if self.text.next_cond("</") {
+                return self.pop_element();
+            } else if self.text.next_cond("<!--") {
+                self.ignore_comment();
+                continue;
+            } else if self.text.next_cond("<") {
+                return self.push_element();
+            } else {
+                return self.push_text();
             }
         }
     }
 
     fn push_text(&mut self) -> Option<XmlEvent<'a>> {
-        let cursor = self.input.cursor();
-        while let Some(ch) = self.input.head() {
-            if ch == '\n' || ch == '<' {
+        let cursor = self.text.cursor();
+        loop {
+            if self.text.next_cond("\n") || self.text.next_cond("<") {
                 break;
-            } else {
-                self.input.next();
             }
         }
-
         Some(XmlEvent::Text {
-            text: self.input.sub_str_from_cursor(cursor).trim_end(),
+            // safety: cursor is from the same str
+            text: unsafe { self.text.sub_str_from_cursor(cursor).trim_end() },
         })
     }
 
     fn push_element(&mut self) -> Option<XmlEvent<'a>> {
-        let cursor = self.input.cursor();
-        while let Some(ch) = self.input.head() {
+        // search for "/>" while returning the text in between
+
+        let cursor = self.text.cursor();
+        while let Some(ch) = self.text.head() {
             if !ch.is_whitespace() && ch != '>' && ch != '/' {
-                self.input.next();
+                self.text.next();
             } else {
-                let name = self.input.sub_str_from_cursor(cursor);
+                let name = self.text.sub_str_from_cursor(cursor);
                 if name.len() == 0 {
                     panic!("missing element name");
                 }
@@ -162,18 +258,18 @@ impl<'a> XmlIter<'a> {
     }
 
     fn pop_element(&mut self) -> Option<XmlEvent<'a>> {
-        let cursor = self.input.cursor();
-        while let Some(ch) = self.input.head() {
+        let cursor = self.text.cursor();
+        while let Some(ch) = self.text.head() {
             if !ch.is_whitespace() && ch != '>' {
-                self.input.next();
+                self.text.next();
             } else {
-                let name = Some(self.input.sub_str_from_cursor(cursor));
+                let name = Some(self.text.sub_str_from_cursor(cursor));
 
-                self.ignore_whitespace();
-                match self.input.head() {
+                self.text.rtrim();
+                match self.text.head() {
                     Some('>') => {
                         // consume '>'
-                        self.input.next();
+                        self.text.next();
                     }
                     Some(ch) => {
                         panic!("unexpected char `{}` (\\u{:X})", ch, ch as u32);
@@ -189,13 +285,13 @@ impl<'a> XmlIter<'a> {
 
     fn element_events(&mut self) -> Option<XmlEvent<'a>> {
         loop {
-            self.ignore_whitespace();
+            self.text.rtrim();
 
-            match self.input.head() {
+            match self.text.head() {
                 Some('<') => {
                     // consume '<'
-                    self.input.next();
-                    match self.input.head() {
+                    self.text.next();
+                    match self.text.head() {
                         Some('!') => self.ignore_comment(),
                         None => panic!("unexpected end of file"),
                         Some(ch) => panic!("unexpected char `{}` (\\u{:X})", ch, ch as u32),
@@ -203,18 +299,18 @@ impl<'a> XmlIter<'a> {
                 }
                 Some('>') => {
                     // consume '>'
-                    self.input.next();
+                    self.text.next();
                     // resume document level events
                     self.prop = false;
                     return self.document_events();
                 }
                 Some('/') => {
                     // consume '/'
-                    self.input.next();
-                    match self.input.head() {
+                    self.text.next();
+                    match self.text.head() {
                         Some('>') => {
                             // consume '>'
-                            self.input.next();
+                            self.text.next();
                             // resume document level events
                             self.prop = false;
                             return Some(XmlEvent::PopElement { name: None });
@@ -241,13 +337,13 @@ impl<'a> XmlIter<'a> {
     fn push_attr(&mut self) -> Option<XmlEvent<'a>> {
         // attribute name
         let name;
-        let cursor = self.input.cursor();
+        let cursor = self.text.cursor();
         loop {
-            if let Some(ch) = self.input.head() {
+            if let Some(ch) = self.text.head() {
                 if !ch.is_whitespace() && ch != '=' && ch != '>' && ch != '/' {
-                    self.input.next();
+                    self.text.next();
                 } else {
-                    name = self.input.sub_str_from_cursor(cursor);
+                    name = self.text.sub_str_from_cursor(cursor);
                     if name.len() == 0 {
                         panic!("missing attribute name");
                     }
@@ -258,21 +354,21 @@ impl<'a> XmlIter<'a> {
             }
         }
 
-        self.ignore_whitespace();
+        self.text.rtrim();
 
-        if self.input.head() != Some('=') {
+        if self.text.head() != Some('=') {
             // attribute has no value
             return Some(XmlEvent::Attr { name, value: None });
         }
 
         // consume '='
-        self.input.next();
-        self.ignore_whitespace();
+        self.text.next();
+        self.text.rtrim();
 
         // expect and consume '\"'
-        match self.input.head() {
+        match self.text.head() {
             Some('\"') => {
-                self.input.next();
+                self.text.next();
             }
             None => panic!("unexpected end of file"),
             Some(ch) => panic!("unexpected char `{}` (\\u{:X})", ch, ch as u32),
@@ -280,26 +376,26 @@ impl<'a> XmlIter<'a> {
 
         // attribute value
         let value;
-        let cursor = self.input.cursor();
+        let cursor = self.text.cursor();
         loop {
-            match self.input.head() {
+            match self.text.head() {
                 Some('\"') => {
-                    value = Some(self.input.sub_str_from_cursor(cursor));
-                    self.input.next();
+                    value = Some(self.text.sub_str_from_cursor(cursor));
+                    self.text.next();
                     break;
                 }
                 Some('\\') => {
                     // consume '\\'
-                    self.input.next();
+                    self.text.next();
                     // ignore scaped char, any escaped utf8 chars in the format '\uXXXX' should be covered
-                    self.input.next();
+                    self.text.next();
                 }
                 None => {
                     panic!("unexpected end of file");
                 }
                 _ => {
                     // keep reading string
-                    self.input.next();
+                    self.text.next();
                 }
             }
         }
