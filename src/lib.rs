@@ -11,6 +11,8 @@
 //!
 //! Less than sign `'<'` must be escaped during texts sequeces
 
+#![cfg_attr(not(test), no_std)]
+
 mod chars;
 use chars::Chars;
 
