@@ -30,10 +30,22 @@ pub enum XmlEvent<'a> {
 // is more strict about the input
 // the only whitespace supported is the original ASCII 0x20 or U+0020
 
-// main goal is to find the folling tokens '<' '=' ' ' '/' '?' '>'
+// main goal is to find the folling tokens '<', '=', ' ', '/', '?', '>'
 
+#[inline(always)]
 const unsafe fn str_from_raw_parts<'a>(ptr: *const u8, len: usize) -> &'a str {
     core::str::from_utf8_unchecked(core::slice::from_raw_parts(ptr, len))
+}
+
+#[inline(always)]
+unsafe fn ignore_spaces(chunk: __m128i) -> i32 {
+    !_mm_movemask_epi8(_mm_or_si128(
+        _mm_or_si128(
+            _mm_cmpeq_epi8(chunk, _mm_set1_epi8(b' ' as i8)), // 0x20
+            _mm_cmpeq_epi8(chunk, _mm_set1_epi8(b'\n' as i8)), // 0x0A
+        ),
+        _mm_cmpeq_epi8(chunk, _mm_set1_epi8(b'\t' as i8)),
+    ))
 }
 
 pub fn parse_xml<'a>(input: &'a str, mut f: impl FnMut(XmlEvent<'a>)) {
@@ -51,8 +63,8 @@ pub fn parse_xml<'a>(input: &'a str, mut f: impl FnMut(XmlEvent<'a>)) {
 
             let chunk = _mm_loadu_si128(ptr as *const _); // 6
 
-            // ignore whitespaces
-            let space_mask = !_mm_movemask_epi8(_mm_cmpeq_epi8(chunk, _mm_set1_epi8(b' ' as i8))); // 4
+            // ignore ' ', '\n' or '\t'
+            let space_mask = ignore_spaces(chunk); // 6
             if space_mask != 0 {
                 let space_offset = space_mask.trailing_zeros() as usize;
 
@@ -68,6 +80,7 @@ pub fn parse_xml<'a>(input: &'a str, mut f: impl FnMut(XmlEvent<'a>)) {
                     // move next
                     ptr = ptr.add(1);
                     let mut offset = 0;
+                    let rem = ptr_end.offset_from(ptr) as usize;
 
                     // begin element
                     loop {
@@ -75,11 +88,11 @@ pub fn parse_xml<'a>(input: &'a str, mut f: impl FnMut(XmlEvent<'a>)) {
                         let ptr_next = ptr.add(offset);
                         if ptr_next >= ptr_end {
                             // use the remainig text to rise the event
-                            offset = ptr_end.offset_from(ptr) as usize;
+                            offset = rem;
                             break;
                         }
 
-                        // look for the tokens ' ', '>' or '/'
+                        // look for the tokens ' ', '>', '/' or '?'
                         // todo: check for '?' because of the xml version statement: <?xml version="1.0" encoding="UTF-8"?>
                         let chunk = _mm_loadu_si128(ptr_next as *const _); // 6
                         let mask = _mm_movemask_epi8(_mm_or_si128(
@@ -87,15 +100,16 @@ pub fn parse_xml<'a>(input: &'a str, mut f: impl FnMut(XmlEvent<'a>)) {
                                 _mm_cmpeq_epi8(chunk, _mm_set1_epi8(b' ' as i8)), // 0x20
                                 _mm_cmpeq_epi8(chunk, _mm_set1_epi8(b'>' as i8)), // 0x3e
                             ),
-                            _mm_cmpeq_epi8(chunk, _mm_set1_epi8(b'/' as i8)), // 0x2f
-                        )); // 8
-
+                            _mm_or_si128(
+                                _mm_cmpeq_epi8(chunk, _mm_set1_epi8(b'/' as i8)), // 0x2f
+                                _mm_cmpeq_epi8(chunk, _mm_set1_epi8(b'?' as i8)), // 0x3f
+                            ),
+                        )); // 10
                         if mask != 0 {
                             offset += mask.trailing_zeros() as usize;
-                            // limit the input
-                            let len = ptr_end.offset_from(ptr) as usize;
-                            if len < offset {
-                                offset = len;
+                            // make sure offset is inside the input bounds
+                            if rem < offset {
+                                offset = rem;
                             }
                             break;
                         } else {
@@ -133,7 +147,7 @@ pub fn parse_xml<'a>(input: &'a str, mut f: impl FnMut(XmlEvent<'a>)) {
                         ptr = ptr.sub(offset);
 
                         // it might be needed for many iterations
-                        let len = ptr_end.offset_from(ptr) as usize;
+                        let rem = ptr_end.offset_from(ptr) as usize;
 
                         // look for the "-->"
                         loop {
@@ -141,7 +155,7 @@ pub fn parse_xml<'a>(input: &'a str, mut f: impl FnMut(XmlEvent<'a>)) {
                             let ptr_next = ptr.add(offset);
                             if ptr_next >= ptr_end {
                                 // use the remainig text to rise the event
-                                offset = len;
+                                offset = rem;
                                 break;
                             }
 
@@ -152,9 +166,9 @@ pub fn parse_xml<'a>(input: &'a str, mut f: impl FnMut(XmlEvent<'a>)) {
 
                             if mask != 0 {
                                 offset += mask.trailing_zeros() as usize;
-                                if len < offset {
+                                if rem < offset {
                                     // consider the remaning of the input as a comment and end the parsing right here
-                                    let text = str_from_raw_parts(ptr, len);
+                                    let text = str_from_raw_parts(ptr, rem);
                                     (f)(XmlEvent::Comment { text });
                                     (f)(XmlEvent::EOF);
                                     return;
@@ -176,13 +190,54 @@ pub fn parse_xml<'a>(input: &'a str, mut f: impl FnMut(XmlEvent<'a>)) {
                         }
                     } else {
                         (f)(XmlEvent::PushElement { name });
+
+                        let token = *ptr;
+                        if token == b'/' || token == b'?' {
+                            // todo: check if should emit and pop event in the case `<r/>`
+                        }
+
                         // todo: emit attribute events
-                        // todo: check if should emmit and pop event in the case `<r/>`
+                        // name *[' '] '=' *[' '] '\"' [text] '\"' (' ' | '\n' | '\t' | '>' | '?' | '/')
                     }
                 } else {
-                    // text until it finds a b'\n' or a b'<'
-                    let mut element_offset = space_offset + 1;
-                    loop {}
+                    let mut offset = 0;
+                    let rem = ptr_end.offset_from(ptr) as usize;
+
+                    // text until it finds a '\n' or a '<'
+                    loop {
+                        // out of bounds check
+                        let ptr_next = ptr.add(offset);
+                        if ptr_next >= ptr_end {
+                            // use the remainig text to rise the event
+                            offset = rem;
+                            break;
+                        }
+
+                        // look for the tokens '\n' or '<'
+                        let chunk = _mm_loadu_si128(ptr_next as *const _); // 6
+                        let mask = _mm_movemask_epi8(_mm_or_si128(
+                            _mm_cmpeq_epi8(chunk, _mm_set1_epi8(b'\n' as i8)), // 0x0A
+                            _mm_cmpeq_epi8(chunk, _mm_set1_epi8(b'<' as i8)),  // 0x3c
+                        )); // 6
+                        if mask != 0 {
+                            offset += mask.trailing_zeros() as usize;
+                            // make sure offset is inside the input bounds
+                            if rem < offset {
+                                offset = rem;
+                            }
+                            break;
+                        } else {
+                            // move next
+                            offset += 16;
+                        }
+                    }
+
+                    // todo: find a better altenative for `trim_end`
+                    let text = str_from_raw_parts(ptr, offset).trim_end();
+                    (f)(XmlEvent::Text { text });
+
+                    // move next
+                    ptr = ptr.add(offset);
                 }
             } else {
                 // move next
@@ -218,7 +273,7 @@ mod tests {
     }
 
     #[test]
-    fn comments_check() {
+    fn comments() {
         assert_xml(
             "   <!--bla-->",
             [XmlEvent::Comment { text: "bla" }, XmlEvent::EOF],
@@ -232,6 +287,69 @@ mod tests {
                 XmlEvent::EOF,
             ],
         );
+    }
+
+    #[test]
+    fn text() {
+        // assert_xml(
+        //     "<a>  some text  </a>",
+        //     [
+        //         XmlEvent::PushElement { name: "a" },
+        //         XmlEvent::Text { text: "some text" },
+        //         XmlEvent::PopElement { name: Some("a") },
+        //         XmlEvent::EOF,
+        //     ],
+        // );
+
+        // assert_xml(
+        //     "<a>some text</a>",
+        //     [
+        //         XmlEvent::PushElement { name: "a" },
+        //         XmlEvent::Text { text: "some text" },
+        //         XmlEvent::PopElement { name: Some("a") },
+        //         XmlEvent::EOF,
+        //     ],
+        // );
+
+        assert_xml(
+            " some  <!--   not  -->   text   ",
+            [
+                XmlEvent::Text { text: "some" },
+                XmlEvent::Comment { text: "   not  " },
+                XmlEvent::Text { text: "text" },
+                XmlEvent::EOF,
+            ],
+        );
+
+        // assert_xml(
+        //     "<a>  some <!-- not --> text  </a>",
+        //     [
+        //         XmlEvent::PushElement { name: "a" },
+        //         XmlEvent::Text { text: "some" },
+        //         XmlEvent::Text { text: "text" },
+        //         XmlEvent::PopElement { name: Some("a") },
+        //         XmlEvent::EOF,
+        //     ],
+        // );
+
+        assert_xml(
+            "  text\n only  ",
+            [
+                XmlEvent::Text { text: "text" },
+                XmlEvent::Text { text: "only" },
+                XmlEvent::EOF,
+            ],
+        );
+
+        // // doesnt support embedding '<' or '>' during the texts
+        // assert_xml(
+        //     "<a>20 &lt; 30</a>",
+        //     [
+        //         XmlEvent::PushElement { name: "a" },
+        //         XmlEvent::Text { text: "20 &lt; 30" },
+        //         XmlEvent::PopElement { name: Some("a") },
+        //     ],
+        // );
     }
 
     // #[test]
