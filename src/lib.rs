@@ -16,6 +16,8 @@
 mod chars;
 use chars::Chars;
 
+mod sse2;
+
 /// Xml events returned from the [`XmlIter`]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum XmlEvent<'a> {
