@@ -80,7 +80,10 @@ pub fn parse_xml<'a>(input: &'a str, mut f: impl FnMut(XmlEvent<'a>)) {
                     // move next
                     ptr = ptr.add(1);
                     let mut offset = 0;
-                    let rem = ptr_end.offset_from(ptr) as usize;
+                    let mut rem = ptr_end.offset_from(ptr) as usize;
+
+                    // todo: check for the case '</'
+                    if rem > 1 {}
 
                     // begin element
                     loop {
@@ -188,16 +191,57 @@ pub fn parse_xml<'a>(input: &'a str, mut f: impl FnMut(XmlEvent<'a>)) {
                                 offset += 16;
                             }
                         }
+                    } else if name.starts_with("/") {
+                        // todo: `name` can't start with '/'
+                        // pop element "</element>"
+                        let name = str_from_raw_parts(name.as_ptr().add(1), name.len() - 1);
+                        (f)(XmlEvent::PopElement { name: Some(name) });
                     } else {
                         (f)(XmlEvent::PushElement { name });
 
-                        let token = *ptr;
-                        if token == b'/' || token == b'?' {
-                            // todo: check if should emit and pop event in the case `<r/>`
-                        }
+                        loop {
+                            // out of bounds check
+                            if ptr >= ptr_end {
+                                (f)(XmlEvent::EOF);
+                                return;
+                            }
 
-                        // todo: emit attribute events
-                        // name *[' '] '=' *[' '] '\"' [text] '\"' (' ' | '\n' | '\t' | '>' | '?' | '/')
+                            let chunk = _mm_loadu_si128(ptr as *const _); // 6
+
+                            // ignore ' ', '\n' or '\t'
+                            let space_mask = ignore_spaces(chunk); // 6
+                            if space_mask != 0 {
+                                let space_offset = space_mask.trailing_zeros() as usize;
+                                ptr = ptr.add(space_offset);
+
+                                // out of bounds check
+                                let rem = ptr_end.offset_from(ptr);
+                                if rem <= 0 {
+                                    (f)(XmlEvent::EOF);
+                                    return;
+                                }
+
+                                let token0 = *ptr;
+                                if token0 == b'>' {
+                                    // done '>'
+                                    ptr = ptr.add(1);
+                                    break;
+                                } else if rem >= 2 {
+                                    // check if should emit and pop event in the cases of a `/>` or `?>`
+                                    let token1 = *ptr.add(1);
+                                    if token1 == b'>' && (token0 == b'/' || token0 == b'?') {
+                                        (f)(XmlEvent::PopElement { name: None });
+                                        ptr = ptr.add(2);
+                                        break;
+                                    }
+                                }
+
+                                // todo: emit attribute events
+                                // name *[' '] '=' *[' '] '\"' [text] '\"' (' ' | '\n' | '\t' | '>' | '?' | '/')
+                            } else {
+                                ptr = ptr.add(16);
+                            }
+                        }
                     }
                 } else {
                     let mut offset = 0;
@@ -291,15 +335,15 @@ mod tests {
 
     #[test]
     fn text() {
-        // assert_xml(
-        //     "<a>  some text  </a>",
-        //     [
-        //         XmlEvent::PushElement { name: "a" },
-        //         XmlEvent::Text { text: "some text" },
-        //         XmlEvent::PopElement { name: Some("a") },
-        //         XmlEvent::EOF,
-        //     ],
-        // );
+        assert_xml(
+            "<a>  some text  </a>",
+            [
+                XmlEvent::PushElement { name: "a" },
+                XmlEvent::Text { text: "some text" },
+                XmlEvent::PopElement { name: Some("a") },
+                XmlEvent::EOF,
+            ],
+        );
 
         // assert_xml(
         //     "<a>some text</a>",
