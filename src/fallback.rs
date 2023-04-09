@@ -1,10 +1,6 @@
 #![allow(unused)]
 
 //use alloc::vec::Vec;
-#[cfg(target_arch = "x86")]
-use core::arch::x86::*;
-#[cfg(target_arch = "x86_64")]
-use core::arch::x86_64::*;
 use core::ptr::null;
 
 use crate::{str_from_range, XmlEvent};
@@ -27,20 +23,12 @@ impl Parser {
     }
 
     #[inline(always)]
-    unsafe fn mask_and_find(&mut self, f: impl Fn(__m128i) -> i32) -> bool {
+    unsafe fn find_match(&mut self, f: impl Fn(u8) -> bool) -> bool {
         while self.ptr < self.ptr_end {
-            let chunk = _mm_loadu_si128(self.ptr as *const _); // 6 cycles
-            let mask = (f)(chunk); // 8 cycles
-            if mask != 0 {
-                // found something
-                let offset = mask.trailing_zeros() as usize;
-
-                // out of bounds check
-                self.ptr = self.ptr.add(offset);
-
+            if (f)(*self.ptr) {
                 return true;
             } else {
-                self.ptr = self.ptr.add(16);
+                self.ptr = self.ptr.add(1);
             }
         }
 
@@ -49,39 +37,15 @@ impl Parser {
 
     // todo: or enter
     unsafe fn ignore_space(&mut self) -> bool {
-        self.mask_and_find(|chunk| {
-            !_mm_movemask_epi8(_mm_or_si128(
-                _mm_cmpeq_epi8(chunk, _mm_set1_epi8(b' ' as i8)), // 0x20 (32)
-                _mm_cmpeq_epi8(chunk, _mm_set1_epi8(b'\t' as i8)), // 0x0B (11)
-            )) // 8 cycles
-        })
-    }
-
-    unsafe fn find(&mut self, ch: u8) -> bool {
-        self.mask_and_find(|chunk| {
-            _mm_movemask_epi8(_mm_cmpeq_epi8(chunk, _mm_set1_epi8(ch as i8))) // 4 cycles
-        })
+        self.find_match(|ch| !(ch == b' ' || ch == b'\t'))
     }
 
     unsafe fn find_space(&mut self) -> bool {
-        self.mask_and_find(|chunk| {
-            _mm_movemask_epi8(_mm_or_si128(
-                _mm_cmpeq_epi8(chunk, _mm_set1_epi8(b' ' as i8)), // 0x20 (32)
-                _mm_cmpeq_epi8(chunk, _mm_set1_epi8(b'\t' as i8)), // 0x0B (11)
-            )) // 8 cycles
-        })
+        self.find_match(|ch| ch == b' ' || ch == b'\t')
     }
 
     unsafe fn find_space_or_enter(&mut self) -> bool {
-        self.mask_and_find(|chunk| {
-            _mm_movemask_epi8(_mm_or_si128(
-                _mm_or_si128(
-                    _mm_cmpeq_epi8(chunk, _mm_set1_epi8(b' ' as i8)), // 0x20 (32)
-                    _mm_cmpeq_epi8(chunk, _mm_set1_epi8(b'\t' as i8)), // 0x0B (11)
-                ),
-                _mm_cmpeq_epi8(chunk, _mm_set1_epi8(b'\n' as i8)), // 0x0A (10)
-            )) // 10 cycles
-        })
+        self.find_match(|ch| ch == b' ' || ch == b'\t' || ch == b'\n')
     }
 
     #[inline(always)]
